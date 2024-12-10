@@ -18,6 +18,8 @@
 
 2. 当你填写好之后，你需要抓取 bullx 的 token，因为我们要请求 k 线数据
 
+发现 bullx 需要邀请才能进（[邀请链接](https://t.me/BullxBetaBot?start=access_FMHMOJU8KT5)）
+
 ![img3](./img/img3.jpg)
 
 填入：
