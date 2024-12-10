@@ -26,7 +26,9 @@
 API_TOKEN = ""
 ```
 
-3. 运行 main.py
+3. 运行 main.py（回测所需的基本字段基本是够的）
+
+![img5](./img/img5.jpg)
 
 4. 结果会输出到 output.xlsx（时间我已经自己加成UTC+8了）
 
