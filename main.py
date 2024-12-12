@@ -10,6 +10,9 @@ API_SLEEP_TIME = 2
 API_TOKEN = ""
 JSON_NAME = "call.json"
 
+def get_nmin_timestamp(timestamp_call: int, minutes: int) -> int:
+    return timestamp_call + (minutes * 60)
+
 def get_ticker_from_pump(address:str) -> str:
     for _ in range(0,3):
         try:
@@ -43,6 +46,39 @@ def get_ticker(token_address:str) -> str:
 
     return ""
 
+
+def chart_data_filter(chart_data: dict, timestamp_call: int, timestamp_end: int = None) -> dict:
+    # 将秒级时间戳转换为毫秒级
+    timestamp_call_ms = timestamp_call * 1000
+    timestamp_end_ms = timestamp_end * 1000 if timestamp_end else None
+
+    # 找出需要保留的数据的起始索引
+    start_index = -1
+    end_index = len(chart_data['t']) if timestamp_end_ms is None else -1
+
+    for i, t in enumerate(chart_data['t']):
+        if start_index == -1 and t >= timestamp_call_ms:
+            start_index = i
+        if timestamp_end_ms and t > timestamp_end_ms:
+            end_index = i
+            break
+
+    # 如果没有找到符合条件的数据，返回空
+    if start_index == -1:
+        return {}
+
+    # 创建新的数据字典，截取所有数组从start_index到end_index的数据
+    new_chart_data = {
+        't': chart_data['t'][start_index:end_index],
+        'o': chart_data['o'][start_index:end_index],
+        'h': chart_data['h'][start_index:end_index],
+        'l': chart_data['l'][start_index:end_index],
+        'c': chart_data['c'][start_index:end_index],
+        'v': chart_data['v'][start_index:end_index]
+    }
+
+    return new_chart_data
+
 def format_timestamp(timestamp: int) -> str:
     """
     需要注意：最后我是添加了UTC+8的时间区
@@ -52,8 +88,11 @@ def format_timestamp(timestamp: int) -> str:
     local_time = utc_time.replace(tzinfo=pytz.UTC).astimezone(tz)
     formatted_time = local_time.strftime('%m月%d日 %H:%M')
     return formatted_time
+
+
 def fetch_chart_data(base, api_token, time_from, time_to):
     url = "https://api-edge.bullx.io/chart"
+    TWELVE_HOURS = 12 * 60 * 60  # 12小时的秒数
 
     headers = {
         "accept": "application/json, text/plain, */*",
@@ -66,31 +105,51 @@ def fetch_chart_data(base, api_token, time_from, time_to):
         "Referrer-Policy": "strict-origin-when-cross-origin"
     }
 
-    payload = {
-        "name": "chart",
-        "data": {
-            "chainId": 1399811149,
-            "base": base,
-            "quote": "So11111111111111111111111111111111111111112",
-            "from": time_from,
-            "to": time_to,
-            "intervalSecs": 60,
-        }
-    }
+    # 初始化合并后的数据结构
+    merged_data = {'t': [], 'o': [], 'h': [], 'l': [], 'c': [], 'v': []}
 
-    for _ in range(0,3):
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                data=json.dumps(payload)
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"错误: {e}")
-            time.sleep(2)
-    raise
+    current_time = time_from
+    while current_time < time_to:
+        # 计算当前批次的结束时间
+        batch_end = min(current_time + TWELVE_HOURS, time_to)
+
+        payload = {
+            "name": "chart",
+            "data": {
+                "chainId": 1399811149,
+                "base": base,
+                "quote": "So11111111111111111111111111111111111111112",
+                "from": current_time,
+                "to": batch_end,
+                "intervalSecs": 60,
+            }
+        }
+
+        for _ in range(0, 3):
+            try:
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    data=json.dumps(payload)
+                )
+                response.raise_for_status()
+                batch_data = response.json()
+
+                # 合并数据
+                if batch_data and all(key in batch_data for key in ['t', 'o', 'h', 'l', 'c', 'v']):
+                    for key in merged_data:
+                        merged_data[key].extend(batch_data[key])
+                break
+            except requests.exceptions.RequestException as e:
+                print(f"错误: {e}")
+                time.sleep(2)
+                continue
+
+        # 更新时间窗口
+        current_time = batch_end
+        time.sleep(API_SLEEP_TIME)  # 添加延迟避免请求过快
+
+    return merged_data
 
 def write_to_excel(data: List[Dict], filename: str = 'output.xlsx'):
     df = pd.DataFrame(data)
@@ -114,70 +173,95 @@ def load_data_call():
 data_call = sorted(load_data_call(), key=lambda x: x['timestamp_call'])
 
 if __name__ == "__main__":
-    timestamp_now = int(time.time())
-    print(f"当前时间：{format_timestamp(timestamp_now)}")
+    timestamp_end = 1733961600
+    print(f"回测终止时间：{format_timestamp(timestamp_end)}")
     print("")
 
-    collected_data = []
+    # 初始化不同时间窗口的数据列表，增加0min
+    time_windows = {
+        "0min": [],  # 新增原始数据
+        "2min": [],
+        "3min": [],
+        "4min": [],
+        "5min": []
+    }
+
     data_call_len = len(data_call)
     for i, call in enumerate(data_call):
         token_address = call["token_address"]
         timestamp_call = call["timestamp_call"]
         ticker = get_ticker(token_address)
-        print(f"({i+1}/{data_call_len}) ${ticker} {format_timestamp(timestamp_call)} | {token_address}")
-        chart_data = fetch_chart_data(token_address, API_TOKEN, timestamp_call, timestamp_now)
+        print(f"({i + 1}/{data_call_len}) ${ticker} {format_timestamp(timestamp_call)} | {token_address}")
 
-        if chart_data:
-            # 获取初始价格（第一个开盘价）和对应时间
-            initial_price = chart_data['o'][0]
-            initial_time = format_timestamp(int(chart_data['t'][0] / 1000))
+        # 获取原始chart数据
+        chart_data = fetch_chart_data(token_address, API_TOKEN, timestamp_call, int(time.time()))
 
-            # 获取最低价和对应时间
-            lowest_price = min(chart_data['l'])
-            lowest_time_index = chart_data['l'].index(lowest_price)
-            lowest_time = format_timestamp(int(chart_data['t'][lowest_time_index] / 1000))
+        # 为每个时间窗口创建数据（包括0min）
+        for minutes, data_list in zip([0, 2, 3, 4, 5], time_windows.values()):
+            # 对于0min使用原始数据，其他情况计算n分钟后的时间戳
+            timestamp_n_min = timestamp_call if minutes == 0 else get_nmin_timestamp(timestamp_call, minutes)
 
-            # 获取最高价和对应时间
-            highest_price = max(chart_data['h'])
-            highest_time_index = chart_data['h'].index(highest_price)
-            highest_time = format_timestamp(int(chart_data['t'][highest_time_index] / 1000))
+            # 过滤数据到指定时间范围
+            chart_data_filtered = chart_data_filter(chart_data, timestamp_n_min, timestamp_end)
 
-            # 获取当前价格（最后一个收盘价）和对应时间
-            current_price = chart_data['c'][-1]
-            current_time = format_timestamp(int(chart_data['t'][-1] / 1000))
+            if chart_data_filtered:
+                # 获取初始价格和时间
+                initial_price = chart_data_filtered['o'][0]
+                initial_time = format_timestamp(int(chart_data_filtered['t'][0] / 1000))
 
-            # 计算各种收益率
-            max_profit_rate = ((highest_price - initial_price) / initial_price) * 100
-            max_loss_rate = ((lowest_price - initial_price) / initial_price) * 100
-            current_profit_rate = ((current_price - initial_price) / initial_price) * 100
+                # 获取最低价和时间
+                lowest_price = min(chart_data_filtered['l'])
+                lowest_time_index = chart_data_filtered['l'].index(lowest_price)
+                lowest_time = format_timestamp(int(chart_data_filtered['t'][lowest_time_index] / 1000))
 
-            print(f"喊单价格: {initial_price:.10f} ({initial_time})")
-            print(f"最低价格: {lowest_price:.10f} ({lowest_time})")
-            print(f"最高价格: {highest_price:.10f} ({highest_time})")
-            print(f"当前价格: {current_price:.10f} ({current_time})")
-            print(f"最高收益率: {max_profit_rate:.2f}%")
-            print(f"最大亏损率: {max_loss_rate:.2f}%")
-            print(f"当前收益率: {current_profit_rate:.2f}%")
-            print("")
+                # 获取最高价和时间
+                highest_price = max(chart_data_filtered['h'])
+                highest_time_index = chart_data_filtered['h'].index(highest_price)
+                highest_time = format_timestamp(int(chart_data_filtered['t'][highest_time_index] / 1000))
 
-            data_entry = {
-                "ticker": ticker,
-                "token_address": token_address,
-                "call_time": format_timestamp(timestamp_call),
-                "initial_price": initial_price,
-                "initial_time": initial_time,
-                "lowest_price": lowest_price,
-                "lowest_time": lowest_time,
-                "highest_price": highest_price,
-                "highest_time": highest_time,
-                "current_price": current_price,
-                "current_time": current_time,
-                "max_profit_rate": max_profit_rate,
-                "max_loss_rate": max_loss_rate,
-                "current_profit_rate": current_profit_rate
-            }
-            collected_data.append(data_entry)
-        else:
-            print("无法获取K线数据，请重新抓取 bullx Token")
-            break
-    write_to_excel(collected_data)
+                # 获取最终价格和时间
+                current_price = chart_data_filtered['c'][-1]
+                current_time = format_timestamp(int(chart_data_filtered['t'][-1] / 1000))
+
+                # 计算收益率
+                max_profit_rate = ((highest_price - initial_price) / initial_price) * 100
+                max_loss_rate = ((lowest_price - initial_price) / initial_price) * 100
+                current_profit_rate = ((current_price - initial_price) / initial_price) * 100
+
+                window_name = "全部数据" if minutes == 0 else f"{minutes}分钟窗口"
+                print(f"\n{window_name}:")
+                print(f"喊单价格: {initial_price:.10f} ({initial_time})")
+                print(f"最低价格: {lowest_price:.10f} ({lowest_time})")
+                print(f"最高价格: {highest_price:.10f} ({highest_time})")
+                print(f"最终价格: {current_price:.10f} ({current_time})")
+                print(f"最高收益率: {max_profit_rate:.2f}%")
+                print(f"最大亏损率: {max_loss_rate:.2f}%")
+                print(f"最终收益率: {current_profit_rate:.2f}%")
+
+                data_entry = {
+                    "ticker": ticker,
+                    "token_address": token_address,
+                    "call_time": format_timestamp(timestamp_call),
+                    "initial_price": initial_price,
+                    "initial_time": initial_time,
+                    "lowest_price": lowest_price,
+                    "lowest_time": lowest_time,
+                    "highest_price": highest_price,
+                    "highest_time": highest_time,
+                    "current_price": current_price,
+                    "current_time": current_time,
+                    "max_profit_rate": max_profit_rate,
+                    "max_loss_rate": max_loss_rate,
+                    "current_profit_rate": current_profit_rate
+                }
+                data_list.append(data_entry)
+            else:
+                window_name = "全部数据" if minutes == 0 else f"{minutes}分钟窗口"
+                print(f"{window_name}: 无有效数据")
+
+        print("\n" + "=" * 50 + "\n")
+
+    # 将每个时间窗口的数据保存到单独的Excel文件
+    for minutes, data_list in time_windows.items():
+        filename = f'output_{minutes}.xlsx'
+        write_to_excel(data_list, filename)
